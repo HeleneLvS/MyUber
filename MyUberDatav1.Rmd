@@ -1,0 +1,324 @@
+---
+title: "Never get an Uber on a Thursday!"
+author: "Helene LvS"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE)
+knitr::opts_chunk$set(fig.width=8, fig.height=5, fig.align = "center" ) 
+```
+
+I recently requested my trip data from Uber. Unfortunately it didn't include the whole list of trips, but at least the results included trips across countries of the EMEA region.
+
+I didn't know what I wanted to do with the data except maybe just compare the different experiences across the three regions I had exposure in.
+
+So, here is my anecdotal analysis of my Uber trips and the bottom line:
+
+*If you're me, never get an Uber on a Thursday...*
+
+```{r library, include=FALSE}
+# I always start my R scripts with these two lines for what it's worth
+# I then also click on the broom button in the plot section to free up as much memory as possible
+rm(list = ls(all.names = TRUE)) 
+gc()
+
+#These are the libraries I have used
+library(readr) 
+library(dplyr) # chains and mutates
+library(lubridate) # Date formats
+library(ggplot2)
+library(plotly) 
+library(tidyverse)
+library(cowplot) # for  facet'ing graphs that do not share the same data structure or graph type. Like par() in base R, but for ggplots
+```
+
+```{r dataprep, include=FALSE}
+#This is my own personal Uber file with trips between 2022 and 2024
+# The long and lats have been removed 
+
+path<-"https://raw.githubusercontent.com/HeleneLvS/MyUber/main/MyPublicUberFile2.csv"
+mud<-read_csv(path) # loads the tibble to mud (My Uber Data)
+mud<-as.data.frame(mud) # change to data frame
+#str(mud) # check the content
+
+#Section to Format, clean & fix the data
+# First fix names replace blank with dot operator 
+mud <- mud %>%  rename_all(~str_replace_all(., "\\s+", ""))
+
+# Lets make sure the caharacter variables are factors where relevant and 
+mud<-mud %>% mutate(across(where(is.character), as.factor))
+
+# ...and dates are dates or Timestamps
+mud$RequestTime<-strptime(mud$RequestTime, format='%Y-%m-%d %H:%M:%S')
+mud$BeginTripTime<-strptime(mud$BeginTripTime, format='%Y-%m-%d %H:%M:%S')
+mud$DropoffTime<-strptime(mud$DropoffTime, format='%Y-%m-%d %H:%M:%S')
+mud$ShortDate<-as.Date(mud$RequestTime)
+
+
+#Lets add some fields that might be useful to the my Uber data file
+mud$DistanceKM<-1.60934*mud$`Distance(miles)`
+
+mud<- mud %>% 
+          mutate(Weekday = wday(BeginTripTime,label=TRUE,abbr=TRUE),                           
+                 HourTripStart = factor(hour(BeginTripTime)),                                
+                 HourRequested = factor(hour(RequestTime)),
+                 Day = factor(mday(DropoffTime)),  
+                 Year = year(BeginTripTime),
+                 Month = month(BeginTripTime,label=TRUE,abbr=TRUE),
+                 TripDuration = as.numeric(difftime(DropoffTime,BeginTripTime,units="mins")),
+                 CostPKM = FareAmount/DistanceKM
+                 )
+
+#Lets Group hour to time of day
+mud$TimeofDayRequested <- case_when(
+  hour(mud$RequestTime)>4 & hour(mud$RequestTime)<= 7 ~ "Early Morning",
+  hour(mud$RequestTime)>7 & hour(mud$RequestTime)<=9 ~ "Morning Rush",
+  hour(mud$RequestTime)>16 & hour(mud$RequestTime)<=18 ~ "Afternoon Rush",
+  hour(mud$RequestTime)>18 | hour(mud$RequestTime)<=4 ~ "Night Time",
+                                     TRUE ~ "Midday"     )
+#Order the factors
+mud$TimeofDayRequested<-factor(mud$TimeofDayRequested,
+       levels = c("Early Morning", "Morning Rush", "Midday", "Afternoon Rush", "Night Time"))
+
+#Create a binary value for the success or cancellation of a trip
+mud$OrderIncomplete<- case_when (mud$TriporOrderStatus == "COMPLETED" ~ 0,
+                                    TRUE ~ 1)
+
+#Since all this data falls in the past and cannot change, 
+#I put together a second file which contains the EUR, ZAR, SAR Exchange rates
+#This data was obtained from Google search and poundsterlinglive.com...
+ER<-as.data.frame(read_csv("https://raw.githubusercontent.com/HeleneLvS/MyUber/main/Exchange%20rates.csv" ))
+##Strip out date details, mid and currency;
+
+ER<- ER[,c(1,6,7)]
+#isolate the date by bringing back only the date between the brackets
+#Start by finding the first bracket that contains the date with a regex. 
+#Use unlist to split the list into a vector to join it to the Exchange rate file
+p1<-unlist(gregexpr('\\(', ER$Date))
+ER$p1<-p1
+
+#In order to not hard code the indices for the positions use the counts of the col & rows
+n<-nrow(ER)
+k<-ncol(ER)
+
+#This loop runs through a regex of sorts and writes the short date to a new column in the data frame
+for (i in 1:n) {
+  ER[i,k+1]<-str_sub(ER[i,1], ER[i,k]+1, ER[i,k]+10)  
+  }
+names(ER)[k+1] <- "ShortDate"
+names(ER)[3] <- "FareCurrency"
+ER$ShortDate<-as.Date(ER$ShortDate, "%d/%m/%Y")
+
+str(ER)
+str(mud)
+
+#I wanted to use sqldf, but the POSIXlt makes it inefficient. 
+#Merge is great and you can use it to outer join
+#So join on Date and currency for the factor to convert all costs to USD
+Alldata<-merge(mud,ER, by = c("ShortDate","FareCurrency") , all.x=TRUE) 
+Alldata$USDpKm<-Alldata$CostPKM*Alldata$Mid
+```
+
+## High Level Exploratory Data Analysis
+
+### Trip counts
+
+Data for 37 of my Uber trips were available; 29 of which completed successfully. There were 8 incidents where the trip was not completed successfully.
+
+-   None of the unsuccessful trips occurred in Africa
+-   All of them occurred on a Thursday
+
+```{r graphics1, echo=FALSE}
+ggplot(data = Alldata, aes(x=TriporOrderStatus, fill = 'grey')) + 
+  geom_bar( fill = 'black')+
+  labs(y = "Total Trip Count", x = "Trip Status")  +
+  ggtitle("Total Trips by Status")+
+  geom_text(aes(label= after_stat(count)), stat = "count", colour='white',
+            position=position_dodge(width=0.9), vjust=2.25) +
+  theme(plot.title.position = 'plot', 
+        plot.title = element_text(hjust = 0.5))
+
+# By City
+
+city<-ggplot(data = Alldata, aes(x=City, fill = TriporOrderStatus)) + 
+  geom_bar()+
+  labs(y = "Total Trip Count", x = "Region")  +
+  ggtitle("Total Trip Status by City")+
+  theme(plot.title.position = 'plot', 
+        plot.title = element_text(hjust = 0.5)
+        )
+
+# by dayname
+DoW<-ggplot(data = Alldata, aes(x=Weekday, fill = TriporOrderStatus)) + 
+  geom_bar()+
+  labs(y = "Total Trip Count", x = "Day Name")  +
+  ggtitle("Total Trip Status by Day of the week")+
+  theme(plot.title.position = 'plot', 
+        plot.title = element_text(hjust = 0.5)
+        )
+
+#Plot them side by side with a single legend at the bottom
+vol<- plot_grid(city + theme(legend.position = "none"), 
+          DoW + theme(legend.position = "none"))
+
+#by grabbing one legend from the one graph and saving it as an object
+legend <- get_legend( city + 
+    guides(color = guide_legend(nrow = 1)) +
+    theme(legend.position = "bottom")
+)
+
+plot_grid(vol, legend, ncol = 1, rel_heights = c(1, .1))
+
+```
+
+When looking at the time of day we can group the hours into categories and display it that way. This helps reduce the complexity for the viewer and often proves more user-friendly when posing such problems to predictive models where the inference of the model parameters are important.
+
+```{r rest, echo=FALSE}
+# by hour
+hr<-ggplot(data = Alldata, aes(x=HourRequested, fill = TriporOrderStatus)) + 
+  geom_bar()+
+  labs(y = "Total Trip Count", x = "Hour Trip Requested")  +
+  ggtitle("Total Trip Status by Hour Requested")+
+  theme(plot.title.position = 'plot', 
+        plot.title = element_text(hjust = 0.5))
+
+# by time of day
+tod<-ggplot(data = Alldata, aes(x=TimeofDayRequested, fill = TriporOrderStatus)) + 
+  geom_bar()+
+  labs(y = "Total Trip Count", x = "Time of Day Trip Requested")  +
+  ggtitle("Total Trip Status by Time of Day Requested")+
+  theme(plot.title.position = 'plot', 
+        plot.title = element_text(hjust = 0.5))
+
+#Plot them side by side with a single legend at the bottom
+tvol<- plot_grid(hr + theme(legend.position = "none"), 
+          tod + theme(legend.position = "none"))
+
+#by grabbing one legend from the one graph and saving it as an object
+legend_t <- get_legend( tod + 
+    guides(color = guide_legend(nrow = 1)) +
+    theme(legend.position = "bottom")
+)
+
+plot_grid(tvol, legend_t, ncol = 1, rel_heights = c(1, .1))
+
+```
+
+### Success Rates:
+
+One of my favourite ways to look at a binary variable is by drawing heatmaps. It often gives a nice way to interpret the results of a classification model too. Some additional data manipulation is required for this;
+
+-   First lets label all the unsuccessful trips with a 1, and all successful trips with a 0
+-   Then we can summarise over the more insightful variables
+
+```{r heat1, echo = TRUE, message=FALSE}
+#Create a binary value for the success or cancellation of a trip
+Alldata$OrderIncomplete<- case_when (Alldata$TriporOrderStatus == "COMPLETED" ~ 0,
+                                     TRUE ~ 1)
+
+#summarise Alldata into sad1:
+sad1<-Alldata %>% group_by (City,  TimeofDayRequested) %>%
+  summarize(IncompleteRate=round(mean(OrderIncomplete),2)
+  )
+
+#Heat map of sorts...
+ggplot(sad1, aes(x = TimeofDayRequested, y = City, fill = IncompleteRate)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low =  "yellow",
+                      high = "red") +
+  labs(x="Time of Day Requested", y= "Region")+
+  geom_text(aes(label = IncompleteRate), color = "black", size = 4) +
+  ggtitle("Heatmap of Unsuccessful Trip Rate by Region and Time of Day")+
+  coord_fixed()
+```
+
+In the same way we get the following heatmap ...
+
+The values inside the tiles can be interpreted as a percentage of trips which are not completed for these pockets of data, for example for all trips in Europe on a Thursday 71% of my trips were not completed successfully
+
+```{r heats, echo= FALSE, message=FALSE}
+sad2<-Alldata %>% group_by (Weekday,  City) %>%
+  summarize(IncompleteRate=round(mean(OrderIncomplete),2)
+  )
+#Heat map of sorts...
+ggplot(sad2, aes(x = Weekday , y = City, fill = IncompleteRate)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient(low =  "yellow",
+                      high = "red") +
+  labs(y="Region", x= "Day Name")+
+  ggtitle("...and Day of the Week")+
+  geom_text(aes(label = IncompleteRate), color = "black", size = 4) +
+  coord_fixed()
+```
+
+*Never get an Uber on a Thursday.... when you're me*
+
+### Pricing:
+
+*In this section we only look at successful trips*
+
+After converting all the trips into US\$ amounts and the distance into the metric system, I had a look at how the trips compared in price
+
+**Caveat: if we really want to make this a fair analysis then obviously we would need to include purchasing power parity, convert the amounts to real terms by looking at inflation and more, however for the purposes of this quick analysis I just wanted to compare the amounts**
+
+From the boxplots you see that the price per Kilometer is noticeably higher in Europe than the other two regions, with two specific outliers:
+
+-   One is for a very short trip
+-   The other was due to a surcharge
+
+```{r boxprice, echo = FALSE}
+Successdata<- Alldata %>% filter(TriporOrderStatus=='COMPLETED')
+
+ggplot(data = Successdata, aes(x=City, y = USDpKm, colour = City)) +
+  geom_boxplot(outlier.colour="red", outlier.shape=7, outlier.size=4)+
+  labs(x="Region")+
+  ggtitle("Spread of cost per Km in US$ by Region") +
+  scale_color_grey()+
+  theme(plot.title.position = 'plot', 
+        plot.title = element_text(hjust = 0.5))
+
+outl<-Alldata %>% filter(USDpKm>4.00)
+```
+
+#### The outliers:
+
+One would theorize that the first few Kilometers would be more expensive and after covering some fixed costs, some economies of scale would set in to drop the cost per Km and start to stabilize. Perhaps the costs would increase again the further the trip takes the driver from their hub.
+
+Fitting a simple linear regression through the data points shows there is a negative correlation between distance and price per km as expected, for all except Africa. This may be due to the relatively large distances traveled or an anomaly caused by low exposure. The fat confidence intervals show that there is definitely more factors that contribute to this
+
+```{r eos, echo = FALSE, message=FALSE}
+ggplot(data = Successdata, aes(x=DistanceKM, y=USDpKm, colour = City))+ geom_jitter()+
+  geom_smooth(method = lm)+
+  ggtitle("Scatter plot with fitted lines by region between price per km and distance")
+```
+
+To understand the surcharge one would need more than a single clients trips. However there is definitely a correlation between time of day and price as well as the day of the week. When comparing the various regions it would be advisable to standardise the weekdays as the weekends do not fall on the same day for the middle east and Europe for example
+
+```{r more, echo = FALSE, message=FALSE}
+CostCity<- Successdata %>% group_by (City, TimeofDayRequested) %>% summarize(AvgCostKm=round(mean(USDpKm),2), Trips=(n()))
+
+#Heat map again
+ggplot(CostCity, aes(x = TimeofDayRequested, y = City, fill = AvgCostKm)) + 
+  geom_tile(color = "white") + scale_fill_gradient(low = "yellow", high = "red") + 
+  geom_text(aes(label = AvgCostKm), color = "black", size = 4) +
+  ggtitle("US$ per km by Region and Time of the day")+
+  labs(x="Time of the Day", y= "Region")+
+  coord_fixed()
+
+ggplot(data=Successdata, aes(x=Weekday, y=USDpKm, colour = City))+ 
+  geom_boxplot()+
+  labs(x= "Day Name")+
+  ggtitle("Spread of the Price per Km by Day of the Week")
+ 
+  
+```
+
+## Conclusion:
+
+I enjoy trying to figure out what companies know about me, and this was really just a self indulgent exercise to do exactly that. When looking at your own data you can often understand an otherwise unknown data set a bit better. 
+
+It would be interesting to see if the Kaggle taxi data set could help build out the theories on cost per km and check how accurately we can predict what the cost would be.
+
+But until then ... I'm hailing a yellow cab if its a Thursday!
