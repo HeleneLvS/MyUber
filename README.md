@@ -4,3 +4,4 @@ I didn't know what I wanted to do with the data except maybe just compare the di
 So, here is my anecdotal analysis of my Uber trips and the bottom line:
 
 *If you're me, never get an Uber on a Thursday...*
+![image](https://github.com/HeleneLvS/MyUber/assets/161077731/80887725-5a2c-47d9-aac2-515fa7bbdb54)
